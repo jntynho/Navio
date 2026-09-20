@@ -1,23 +1,28 @@
 package com.nuvio.app.features.downloads
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -32,10 +37,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil3.compose.AsyncImage
 import com.nuvio.app.core.i18n.localizedByteUnit
 import com.nuvio.app.core.ui.NuvioScreen
 import com.nuvio.app.core.ui.NuvioScreenHeader
@@ -57,6 +65,8 @@ fun DownloadsScreen(
         DownloadsRepository.uiState
     }.collectAsStateWithLifecycle()
 
+    val downloadSpeeds by DownloadsRepository.downloadSpeeds.collectAsStateWithLifecycle()
+
     var selectedShowId by rememberSaveable(initialShowId) { mutableStateOf(initialShowId) }
     var downloadPendingDeletionId by rememberSaveable { mutableStateOf<String?>(null) }
     val openDownloadsDirectoryFailedText = stringResource(Res.string.downloads_open_directory_failed)
@@ -72,6 +82,15 @@ fun DownloadsScreen(
             completedEpisodes.firstOrNull { it.parentMetaId == showId }?.title
         }
     }
+
+    // Batch-action affordances only make sense at the root list, and only when
+    // there is something for them to act on.
+    val hasDownloadingItems = uiState.items.any { it.status == DownloadStatus.Downloading }
+    val hasPausedItems = uiState.items.any { it.status == DownloadStatus.Paused }
+    val hasFailedItems = uiState.items.any { it.status == DownloadStatus.Failed }
+    val pauseAllDescription = stringResource(Res.string.downloads_action_pause_all)
+    val resumeAllDescription = stringResource(Res.string.downloads_action_resume_all)
+    val retryFailedDescription = stringResource(Res.string.downloads_action_retry_failed)
 
     NuvioScreen {
         stickyHeader {
@@ -89,6 +108,32 @@ fun DownloadsScreen(
                     }
                 },
                 actions = {
+                    if (selectedShowId == null) {
+                        if (hasDownloadingItems) {
+                            IconButton(onClick = { DownloadsRepository.pauseActiveDownloads() }) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Pause,
+                                    contentDescription = pauseAllDescription,
+                                )
+                            }
+                        }
+                        if (hasPausedItems) {
+                            IconButton(onClick = { DownloadsRepository.resumeAllDownloads() }) {
+                                Icon(
+                                    imageVector = Icons.Rounded.PlayArrow,
+                                    contentDescription = resumeAllDescription,
+                                )
+                            }
+                        }
+                        if (hasFailedItems) {
+                            IconButton(onClick = { DownloadsRepository.retryFailedDownloads() }) {
+                                Icon(
+                                    imageVector = Icons.Rounded.RestartAlt,
+                                    contentDescription = retryFailedDescription,
+                                )
+                            }
+                        }
+                    }
                     IconButton(
                         onClick = {
                             if (!DownloadsPlatformDownloader.openDownloadsDirectory()) {
@@ -108,6 +153,7 @@ fun DownloadsScreen(
         if (selectedShowId == null) {
             downloadsRootContent(
                 uiState = uiState,
+                downloadSpeeds = downloadSpeeds,
                 onOpenDownload = onOpenDownload,
                 onOpenShow = { showId, title ->
                     onNavigateToShow?.invoke(showId, title) ?: run { selectedShowId = showId }
@@ -118,6 +164,7 @@ fun DownloadsScreen(
             downloadsShowContent(
                 showId = selectedShowId.orEmpty(),
                 episodes = completedEpisodes,
+                downloadSpeeds = downloadSpeeds,
                 onOpenDownload = onOpenDownload,
                 onDeleteDownload = { downloadPendingDeletionId = it },
             )
@@ -143,6 +190,7 @@ fun DownloadsScreen(
 
 private fun LazyListScope.downloadsRootContent(
     uiState: DownloadsUiState,
+    downloadSpeeds: Map<String, Long>,
     onOpenDownload: (DownloadItem) -> Unit,
     onOpenShow: (showId: String, title: String) -> Unit,
     onDeleteDownload: (String) -> Unit,
@@ -169,6 +217,7 @@ private fun LazyListScope.downloadsRootContent(
         ) { item ->
             DownloadRow(
                 item = item,
+                speedBytesPerSecond = downloadSpeeds[item.id],
                 onOpen = { onOpenDownload(item) },
                 onPause = { DownloadsRepository.pauseDownload(item.id) },
                 onResume = { DownloadsRepository.resumeDownload(item.id) },
@@ -188,6 +237,7 @@ private fun LazyListScope.downloadsRootContent(
         ) { item ->
             DownloadRow(
                 item = item,
+                speedBytesPerSecond = null,
                 onOpen = { onOpenDownload(item) },
                 onPause = { DownloadsRepository.pauseDownload(item.id) },
                 onResume = { DownloadsRepository.resumeDownload(item.id) },
@@ -268,6 +318,7 @@ private fun LazyListScope.downloadsRootContent(
 private fun LazyListScope.downloadsShowContent(
     showId: String,
     episodes: List<DownloadItem>,
+    downloadSpeeds: Map<String, Long>,
     onOpenDownload: (DownloadItem) -> Unit,
     onDeleteDownload: (String) -> Unit,
 ) {
@@ -321,6 +372,7 @@ private fun LazyListScope.downloadsShowContent(
         ) { item ->
             DownloadRow(
                 item = item,
+                speedBytesPerSecond = downloadSpeeds[item.id],
                 onOpen = { onOpenDownload(item) },
                 onPause = { DownloadsRepository.pauseDownload(item.id) },
                 onResume = { DownloadsRepository.resumeDownload(item.id) },
@@ -334,6 +386,7 @@ private fun LazyListScope.downloadsShowContent(
 @Composable
 private fun DownloadRow(
     item: DownloadItem,
+    speedBytesPerSecond: Long?,
     onOpen: () -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
@@ -345,6 +398,7 @@ private fun DownloadRow(
         item = item,
         displayTitle = displayTitle,
     )
+    val qualityLabel = remember(item.streamTitle) { extractQualityLabel(item.streamTitle) }
 
     Surface(
         modifier = Modifier
@@ -354,102 +408,303 @@ private fun DownloadRow(
         shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
-        Column(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Top,
+            DownloadPosterThumbnail(item)
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Top,
                 ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text(
+                            text = displayTitle,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (displaySubtitle.isNotBlank()) {
+                            Text(
+                                text = displaySubtitle,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        when (item.status) {
+                            DownloadStatus.Downloading -> {
+                                IconButton(onClick = onPause) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Pause,
+                                        contentDescription = stringResource(Res.string.compose_action_pause),
+                                    )
+                                }
+                            }
+                            DownloadStatus.Paused -> {
+                                IconButton(onClick = onResume) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.PlayArrow,
+                                        contentDescription = stringResource(Res.string.action_resume),
+                                    )
+                                }
+                            }
+                            DownloadStatus.Failed -> {
+                                IconButton(onClick = onRetry) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Refresh,
+                                        contentDescription = stringResource(Res.string.action_retry),
+                                    )
+                                }
+                            }
+                            DownloadStatus.Completed -> {
+                                IconButton(onClick = onOpen) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.PlayArrow,
+                                        contentDescription = stringResource(Res.string.action_play),
+                                    )
+                                }
+                            }
+                        }
+                        IconButton(onClick = onDelete) {
+                            Icon(
+                                imageVector = Icons.Rounded.Delete,
+                                contentDescription = stringResource(Res.string.action_delete),
+                            )
+                        }
+                    }
+                }
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    StatusIndicator(item)
+                    if (qualityLabel != null) {
+                        QualityBadge(qualityLabel)
+                    }
                     Text(
-                        text = displayTitle,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = displaySubtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = statusText(item),
+                        text = item.providerName,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    when (item.status) {
-                        DownloadStatus.Downloading -> {
-                            IconButton(onClick = onPause) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Pause,
-                                    contentDescription = stringResource(Res.string.compose_action_pause),
-                                )
-                            }
-                        }
-                        DownloadStatus.Paused -> {
-                            IconButton(onClick = onResume) {
-                                Icon(
-                                    imageVector = Icons.Rounded.PlayArrow,
-                                    contentDescription = stringResource(Res.string.action_resume),
-                                )
-                            }
-                        }
-                        DownloadStatus.Failed -> {
-                            IconButton(onClick = onRetry) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Refresh,
-                                    contentDescription = stringResource(Res.string.action_retry),
-                                )
-                            }
-                        }
-                        DownloadStatus.Completed -> {
-                            IconButton(onClick = onOpen) {
-                                Icon(
-                                    imageVector = Icons.Rounded.PlayArrow,
-                                    contentDescription = stringResource(Res.string.action_play),
-                                )
-                            }
-                        }
+                when (item.status) {
+                    DownloadStatus.Downloading, DownloadStatus.Paused -> {
+                        DownloadProgressSection(item = item, speedBytesPerSecond = speedBytesPerSecond)
                     }
-                    IconButton(onClick = onDelete) {
-                        Icon(
-                            imageVector = Icons.Rounded.Delete,
-                            contentDescription = stringResource(Res.string.action_delete),
+                    DownloadStatus.Failed -> {
+                        Text(
+                            text = item.errorMessage ?: stringResource(Res.string.downloads_status_failed),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
-                }
-            }
-
-            if (item.status == DownloadStatus.Downloading) {
-                if (item.totalBytes != null && item.totalBytes > 0L) {
-                    LinearProgressIndicator(
-                        progress = item.progressFraction,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                } else {
-                    LinearProgressIndicator(
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    DownloadStatus.Completed -> {
+                        Text(
+                            text = statusText(item),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }
     }
 }
+
+@Composable
+private fun DownloadPosterThumbnail(item: DownloadItem) {
+    val imageUrl = item.episodeThumbnail?.takeIf { it.isNotBlank() }
+        ?: item.poster?.takeIf { it.isNotBlank() }
+
+    Box(
+        modifier = Modifier
+            .size(width = 56.dp, height = 78.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+    ) {
+        if (imageUrl != null) {
+            AsyncImage(
+                model = imageUrl,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+        }
+    }
+}
+
+@Composable
+private fun StatusIndicator(item: DownloadItem) {
+    val color = when (item.status) {
+        DownloadStatus.Downloading -> MaterialTheme.colorScheme.primary
+        DownloadStatus.Paused -> MaterialTheme.colorScheme.tertiary
+        DownloadStatus.Completed -> MaterialTheme.colorScheme.primary
+        DownloadStatus.Failed -> MaterialTheme.colorScheme.error
+    }
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(6.dp)
+                .clip(CircleShape)
+                .background(color),
+        )
+        Text(
+            text = statusLabel(item.status),
+            style = MaterialTheme.typography.labelSmall,
+            color = color,
+        )
+    }
+}
+
+@Composable
+private fun QualityBadge(label: String) {
+    Surface(
+        shape = RoundedCornerShape(4.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+            maxLines = 1,
+        )
+    }
+}
+
+@Composable
+private fun DownloadProgressSection(
+    item: DownloadItem,
+    speedBytesPerSecond: Long?,
+) {
+    val hasTotal = item.totalBytes != null && item.totalBytes > 0L
+    val progressColor = if (item.status == DownloadStatus.Paused) {
+        MaterialTheme.colorScheme.tertiary
+    } else {
+        MaterialTheme.colorScheme.primary
+    }
+    val trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+
+    if (hasTotal) {
+        LinearProgressIndicator(
+            progress = item.progressFraction,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .clip(RoundedCornerShape(2.dp)),
+            color = progressColor,
+            trackColor = trackColor,
+        )
+    } else {
+        LinearProgressIndicator(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .clip(RoundedCornerShape(2.dp)),
+            color = progressColor,
+            trackColor = trackColor,
+        )
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = statusText(item),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+
+        if (item.status == DownloadStatus.Downloading) {
+            val activeSpeed = speedBytesPerSecond?.takeIf { it > 0L }
+            val speedText = activeSpeed?.let {
+                stringResource(Res.string.downloads_speed_format, formatBytes(it))
+            }
+            val etaText = if (hasTotal && activeSpeed != null) {
+                val remainingBytes = (item.totalBytes!! - item.downloadedBytes).coerceAtLeast(0L)
+                formatEta(remainingBytes = remainingBytes, bytesPerSecond = activeSpeed)
+            } else {
+                null
+            }
+            val trailingText = listOfNotNull(speedText, etaText)
+                .joinToString(separator = " · ")
+                .ifBlank { stringResource(Res.string.downloads_eta_calculating) }
+
+            Text(
+                text = trailingText,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun formatEta(remainingBytes: Long, bytesPerSecond: Long): String? {
+    if (bytesPerSecond <= 0L) return null
+    val totalSeconds = remainingBytes / bytesPerSecond
+    val hours = totalSeconds / 3600L
+    val minutes = (totalSeconds % 3600L) / 60L
+    val seconds = totalSeconds % 60L
+
+    val durationText = when {
+        hours > 0L -> stringResource(Res.string.downloads_eta_unit_hm, hours.toInt(), minutes.toInt())
+        minutes > 0L -> stringResource(Res.string.downloads_eta_unit_ms, minutes.toInt(), seconds.toInt())
+        else -> stringResource(Res.string.downloads_eta_unit_s, seconds.toInt())
+    }
+    return stringResource(Res.string.downloads_eta_left, durationText)
+}
+
+@Composable
+private fun statusLabel(status: DownloadStatus): String = when (status) {
+    DownloadStatus.Downloading -> stringResource(Res.string.downloads_status_label_downloading)
+    DownloadStatus.Paused -> stringResource(Res.string.downloads_status_label_paused)
+    DownloadStatus.Completed -> stringResource(Res.string.downloads_status_label_completed)
+    DownloadStatus.Failed -> stringResource(Res.string.downloads_status_failed)
+}
+
+private val qualityRegex = Regex(
+    "2160p|4K|1080p|720p|480p|360p|HDR10\\+|HDR10|HDR|DV|REMUX",
+    RegexOption.IGNORE_CASE,
+)
+
+private fun extractQualityLabel(streamTitle: String): String? =
+    qualityRegex.find(streamTitle)?.value
 
 private fun DownloadItem.displayTitle(): String =
     if (isEpisode) {
@@ -466,7 +721,7 @@ private fun downloadDisplaySubtitle(
     val seasonNumber = item.seasonNumber
     val episodeNumber = item.episodeNumber
     if (seasonNumber == null || episodeNumber == null) {
-        return item.displaySubtitle
+        return item.displaySubtitle.ifBlank { item.streamTitle }
     }
 
     val episodeCode = stringResource(
