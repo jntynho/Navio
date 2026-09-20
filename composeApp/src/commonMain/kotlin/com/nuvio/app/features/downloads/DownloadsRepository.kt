@@ -22,6 +22,47 @@ object DownloadsRepository {
     private var hasLoaded = false
     private var nextDownloadOrdinal = 0L
 
+    // Tracks the last (downloadedBytes, epochMs) sample per download so transfer
+    // speed can be derived between progress ticks. In-memory only — speed is a
+    // live/ephemeral signal, not something we persist or restore across restarts.
+    private val speedSamples = mutableMapOf<String, Pair<Long, Long>>()
+    private val _downloadSpeeds = MutableStateFlow<Map<String, Long>>(emptyMap())
+
+    /** Smoothed bytes-per-second for each in-progress download id. */
+    val downloadSpeeds: StateFlow<Map<String, Long>> = _downloadSpeeds.asStateFlow()
+
+    private fun recordProgressSample(downloadId: String, downloadedBytes: Long) {
+        val now = DownloadsClock.nowEpochMs()
+        val previous = speedSamples[downloadId]
+        if (previous == null) {
+            speedSamples[downloadId] = downloadedBytes to now
+            return
+        }
+
+        val (previousBytes, previousTimeMs) = previous
+        val elapsedMs = now - previousTimeMs
+        // Skip over-frequent ticks so the instantaneous speed doesn't spike from
+        // dividing by a near-zero time delta.
+        if (elapsedMs < 400L) return
+
+        val deltaBytes = (downloadedBytes - previousBytes).coerceAtLeast(0L)
+        val instantSpeed = (deltaBytes * 1000L) / elapsedMs
+        val previousSpeed = _downloadSpeeds.value[downloadId] ?: instantSpeed
+        // Exponential moving average keeps the displayed speed from jumping
+        // around on every network chunk.
+        val smoothedSpeed = ((previousSpeed * 0.7) + (instantSpeed * 0.3)).toLong()
+
+        _downloadSpeeds.update { it + (downloadId to smoothedSpeed) }
+        speedSamples[downloadId] = downloadedBytes to now
+    }
+
+    private fun clearProgressSample(downloadId: String) {
+        speedSamples.remove(downloadId)
+        if (_downloadSpeeds.value.containsKey(downloadId)) {
+            _downloadSpeeds.update { it - downloadId }
+        }
+    }
+
     fun ensureLoaded() {
         if (hasLoaded) return
         loadFromDisk()
@@ -34,6 +75,8 @@ object DownloadsRepository {
     fun clearLocalState() {
         activeHandles.values.forEach(DownloadsTaskHandle::cancel)
         activeHandles.clear()
+        speedSamples.clear()
+        _downloadSpeeds.value = emptyMap()
         hasLoaded = false
         _uiState.value = DownloadsUiState()
         notifyLiveStatusPlatform()
@@ -140,6 +183,7 @@ object DownloadsRepository {
         if (existing != null) {
             replacedExisting = true
             activeHandles.remove(existing.id)?.cancel()
+            clearProgressSample(existing.id)
             DownloadsPlatformDownloader.removeFile(playableLocalFileUri(existing) ?: existing.localFileUri)
             DownloadsPlatformDownloader.removePartialFile(existing.fileName)
             currentItems.removeAll { it.id == existing.id }
@@ -207,6 +251,7 @@ object DownloadsRepository {
         if (item.status != DownloadStatus.Downloading) return
 
         activeHandles.remove(downloadId)?.cancel()
+        clearProgressSample(downloadId)
         mutateItem(downloadId) { current ->
             current.copy(
                 status = DownloadStatus.Paused,
@@ -224,11 +269,30 @@ object DownloadsRepository {
             .forEach(::pauseDownload)
     }
 
+    /** Resumes every Paused download. Used by the "Resume all" batch action. */
+    fun resumeAllDownloads() {
+        ensureLoaded()
+        _uiState.value.items
+            .filter { it.status == DownloadStatus.Paused }
+            .map { it.id }
+            .forEach(::resumeDownload)
+    }
+
+    /** Retries every Failed download. Used by the "Retry failed" batch action. */
+    fun retryFailedDownloads() {
+        ensureLoaded()
+        _uiState.value.items
+            .filter { it.status == DownloadStatus.Failed }
+            .map { it.id }
+            .forEach(::retryDownload)
+    }
+
     fun resumeDownload(downloadId: String) {
         ensureLoaded()
         val item = _uiState.value.items.firstOrNull { it.id == downloadId } ?: return
         if (item.status != DownloadStatus.Paused && item.status != DownloadStatus.Failed) return
 
+        clearProgressSample(downloadId)
         val reset = item.copy(
             status = DownloadStatus.Downloading,
             errorMessage = null,
@@ -249,6 +313,7 @@ object DownloadsRepository {
         if (!hasLoaded) return
         val item = _uiState.value.items.firstOrNull { it.id == downloadId } ?: return
         activeHandles.remove(downloadId)?.cancel()
+        clearProgressSample(downloadId)
         val restored = DownloadsPlatformDownloader.restoreItem(item)
         replaceItem(restored)
         persist()
@@ -260,6 +325,7 @@ object DownloadsRepository {
         val item = _uiState.value.items.firstOrNull { it.id == downloadId } ?: return
 
         activeHandles.remove(downloadId)?.cancel()
+        clearProgressSample(downloadId)
         DownloadsPlatformDownloader.removeFile(playableLocalFileUri(item) ?: item.localFileUri)
         DownloadsPlatformDownloader.removePartialFile(item.fileName)
 
@@ -303,6 +369,7 @@ object DownloadsRepository {
         val handle = DownloadsPlatformDownloader.start(
             request = request,
             onProgress = { downloadedBytes, totalBytes ->
+                recordProgressSample(item.id, downloadedBytes.coerceAtLeast(0L))
                 mutateItem(item.id) { current ->
                     if (current.status != DownloadStatus.Downloading) {
                         current
@@ -318,6 +385,7 @@ object DownloadsRepository {
             },
             onSuccess = { localFileUri, totalBytes ->
                 activeHandles.remove(item.id)
+                clearProgressSample(item.id)
                 mutateItem(item.id) { current ->
                     if (current.status != DownloadStatus.Downloading) return@mutateItem current
                     current.copy(
@@ -336,6 +404,7 @@ object DownloadsRepository {
             },
             onFailure = { message ->
                 activeHandles.remove(item.id)
+                clearProgressSample(item.id)
                 mutateItem(item.id) { current ->
                     if (current.status != DownloadStatus.Downloading) {
                         current
@@ -350,6 +419,7 @@ object DownloadsRepository {
             },
             onPaused = {
                 activeHandles.remove(item.id)
+                clearProgressSample(item.id)
                 mutateItem(item.id) { current ->
                     if (current.status != DownloadStatus.Downloading) return@mutateItem current
                     current.copy(status = DownloadStatus.Paused, errorMessage = null)
